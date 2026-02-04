@@ -1,0 +1,19 @@
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# Force Unix LF line endings for shell scripts
+*.sh text eol=lf
+
+# Force Unix LF for Python files
+*.py text eol=lf
+
+# Force Unix LF for markdown
+*.md text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
