@@ -2,6 +2,11 @@
 
 # AutoCandidate Interactive Runner
 # This script provides an interactive menu to run AutoCandidate
+#
+# Features:
+# - Tab completion for file and directory paths
+# - Optional fzf integration for directory browsing (if installed)
+# - Interactive configuration with sensible defaults
 
 set -e
 
@@ -34,6 +39,51 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}✗${NC} $1"
+}
+
+# Helper function to read path with autocomplete
+read_path() {
+    local prompt="$1"
+    local default="$2"
+    local result
+
+    # Enable readline and file completion
+    if [ -n "$default" ]; then
+        read -e -p "$prompt [$default]: " result
+        result=${result:-$default}
+    else
+        read -e -p "$prompt: " result
+    fi
+
+    echo "$result"
+}
+
+# Helper function to select directory with fzf if available
+select_directory() {
+    local prompt="$1"
+    local start_dir="${2:-.}"
+
+    # Check if fzf is available
+    if command -v fzf &> /dev/null; then
+        echo ""
+        print_info "Tip: You can use fzf to browse directories, or type/paste a path directly"
+        echo "  [f] Browse with fzf"
+        echo "  [t] Type/paste path"
+        read -p "Choose [f/t]: " choice
+
+        if [[ "$choice" =~ ^[Ff]$ ]]; then
+            # Use fzf to select directory
+            local selected
+            selected=$(find "$start_dir" -type d 2>/dev/null | fzf --height 40% --reverse --border --prompt="Select directory: ")
+            if [ -n "$selected" ]; then
+                echo "$selected"
+                return
+            fi
+        fi
+    fi
+
+    # Fallback to regular input with tab completion
+    read_path "$prompt"
 }
 
 # Check if virtual environment exists
@@ -85,7 +135,9 @@ case $main_choice in
         echo ""
 
         # Prompt file
-        read -p "Enter path to prompt file (e.g., prompt.md): " prompt_file
+        print_info "Tab completion is enabled for path inputs"
+        echo ""
+        prompt_file=$(read_path "Enter path to prompt file (e.g., prompt.md)")
         if [ ! -f "$prompt_file" ]; then
             print_warning "Prompt file not found at: $prompt_file"
             read -p "Continue anyway? (y/n): " continue_choice
@@ -105,17 +157,18 @@ case $main_choice in
         cmd="python auto_candidate/main.py start \"$prompt_file\""
 
         if [ "$repo_choice" == "1" ]; then
-            read -p "Enter local repository path: " local_path
+            echo ""
+            local_path=$(select_directory "Enter local repository path")
             cmd="$cmd --local-path \"$local_path\""
         else
+            echo ""
             read -p "Enter Git repository URL: " repo_url
             cmd="$cmd --repo-url \"$repo_url\""
         fi
 
         # Workspace
         echo ""
-        read -p "Workspace directory [./workspace]: " workspace
-        workspace=${workspace:-./workspace}
+        workspace=$(read_path "Workspace directory" "./workspace")
         if [ "$workspace" != "./workspace" ]; then
             cmd="$cmd --workspace \"$workspace\""
         fi
@@ -200,8 +253,7 @@ case $main_choice in
 
     2)
         # Checkpoint status
-        read -p "Workspace directory [./workspace]: " workspace
-        workspace=${workspace:-./workspace}
+        workspace=$(read_path "Workspace directory" "./workspace")
 
         print_info "Checking checkpoint status..."
         python auto_candidate/main.py checkpoint-status --workspace "$workspace"
@@ -209,8 +261,7 @@ case $main_choice in
 
     3)
         # Clear checkpoint
-        read -p "Workspace directory [./workspace]: " workspace
-        workspace=${workspace:-./workspace}
+        workspace=$(read_path "Workspace directory" "./workspace")
 
         read -p "Are you sure you want to clear the checkpoint? (y/n): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -222,8 +273,7 @@ case $main_choice in
 
     4)
         # View checkpoint info
-        read -p "Workspace directory [./workspace]: " workspace
-        workspace=${workspace:-./workspace}
+        workspace=$(read_path "Workspace directory" "./workspace")
 
         print_info "Fetching checkpoint info..."
         python auto_candidate/main.py checkpoint-info --workspace "$workspace"
