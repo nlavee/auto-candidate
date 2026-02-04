@@ -640,5 +640,53 @@ def start(
     console.print(f"[dim]Project located at: {repo_path}[/dim]")
     console.print(f"[dim]To inspect: cd {workspace}/target_repo && git checkout {base_branch}[/dim]")
 
+
+@app.command()
+def checkpoint_status(
+    workspace: str = typer.Option("./workspace", help="Workspace directory")
+):
+    """Display checkpoint status without resuming"""
+    abs_workspace = os.path.abspath(workspace)
+    checkpoint = CheckpointManager(abs_workspace)
+
+    if not checkpoint.checkpoint_exists():
+        console.print("[yellow]No checkpoint found[/yellow]")
+        return
+
+    checkpoint_data = checkpoint.load_checkpoint()
+    display_resume_status(checkpoint_data)
+
+
+@app.command()
+def checkpoint_clear(
+    workspace: str = typer.Option("./workspace", help="Workspace directory")
+):
+    """Clear existing checkpoint"""
+    abs_workspace = os.path.abspath(workspace)
+    checkpoint = CheckpointManager(abs_workspace)
+
+    if checkpoint.checkpoint_exists():
+        checkpoint.clear_checkpoint()
+        console.print("[green]Checkpoint cleared[/green]")
+    else:
+        console.print("[yellow]No checkpoint found[/yellow]")
+
+
+@app.command()
+def checkpoint_info(
+    workspace: str = typer.Option("./workspace", help="Workspace directory")
+):
+    """Show detailed checkpoint information"""
+    abs_workspace = os.path.abspath(workspace)
+    checkpoint = CheckpointManager(abs_workspace)
+
+    if not checkpoint.checkpoint_exists():
+        console.print("[yellow]No checkpoint found[/yellow]")
+        return
+
+    checkpoint_data = checkpoint.load_checkpoint()
+    console.print(json.dumps(checkpoint_data, indent=2))
+
+
 if __name__ == "__main__":
     app()
