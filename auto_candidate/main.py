@@ -558,18 +558,28 @@ def start(
         test_attempt_start = 0
         tasks_to_merge = successful_tasks
 
-    # Merge remaining branches
+    # Merge remaining branches (check if they exist first)
     merge_success_count = len(merged_branches)
     for res in tasks_to_merge:
-        if git_ops.merge_feature_branch(
+        branch_name = res["branch"]
+
+        # Check if branch exists before attempting merge
+        try:
+            repo.git.rev_parse('--verify', branch_name)
+            branch_exists = True
+        except:
+            branch_exists = False
+            console.print(f"[yellow]Warning: Branch {branch_name} does not exist, skipping...[/yellow]")
+
+        if branch_exists and git_ops.merge_feature_branch(
             repo_path,
             base_branch,
-            res["branch"],
+            branch_name,
             resolver=integration_provider,
             plan_context=master_doc
         ):
             merge_success_count += 1
-            merged_branches.add(res["branch"])
+            merged_branches.add(branch_name)
 
     console.print(f"\n[green]Merged {merge_success_count}/{len(successful_tasks)} feature branches into {base_branch}[/green]")
 
