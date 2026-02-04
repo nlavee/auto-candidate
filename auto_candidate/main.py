@@ -32,6 +32,61 @@ def create_provider(provider_name: str, api_key: str, model_name: str) -> BaseLL
     else:
         raise ValueError(f"Unknown provider: {provider_name}. Supported: gemini, claude")
 
+
+def display_resume_status(checkpoint_data: dict):
+    """Display detailed resume status"""
+    console.print("\n[bold cyan]Resume Status:[/bold cyan]")
+
+    current_phase = checkpoint_data["current_phase"]
+    phases_completed = checkpoint_data.get("phases_completed", [])
+
+    table = Table(title="Checkpoint Status")
+    table.add_column("Phase", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("Details")
+
+    # Phase 1
+    status_1 = "✓ Completed" if 1 in phases_completed else "⧗ In Progress"
+    table.add_row("1. Initialization", status_1, checkpoint_data.get("workspace", ""))
+
+    # Phase 2
+    if 2 in phases_completed:
+        phase_2 = checkpoint_data.get("phase_2_state", {})
+        num_tasks = len(phase_2.get("plan_data", {}).get("tasks", []))
+        status_2 = "✓ Completed"
+        details_2 = f"{num_tasks} tasks planned"
+    else:
+        status_2 = "⧗ In Progress" if current_phase == 2 else "○ Pending"
+        details_2 = ""
+    table.add_row("2. Planning", status_2, details_2)
+
+    # Phase 3
+    if 3 in phases_completed:
+        phase_3 = checkpoint_data.get("phase_3_state", {})
+        results = phase_3.get("task_results", [])
+        completed = sum(1 for r in results if r.get("completed"))
+        failed = sum(1 for r in results if r.get("status") == "ERROR")
+        status_3 = "✓ Completed"
+        details_3 = f"{completed} tasks completed, {failed} failed"
+    else:
+        status_3 = "⧗ In Progress" if current_phase == 3 else "○ Pending"
+        details_3 = ""
+    table.add_row("3. Execution", status_3, details_3)
+
+    # Phase 4
+    if 4 in phases_completed:
+        phase_4 = checkpoint_data.get("phase_4_state", {})
+        tests_passed = phase_4.get("tests_passed", False)
+        status_4 = "✓ Completed" if tests_passed else "✗ Failed"
+        details_4 = "Tests passed" if tests_passed else "Tests failed"
+    else:
+        status_4 = "⧗ In Progress" if current_phase == 4 else "○ Pending"
+        details_4 = ""
+    table.add_row("4. Integration", status_4, details_4)
+
+    console.print(table)
+    console.print(f"\n[green]Will resume from Phase {current_phase + 1}[/green]\n")
+
 def process_task(
     task: Dict[str, Any],
     base_repo_path: str,
@@ -228,7 +283,7 @@ def start(
         if checkpoint.validate_checkpoint(prompt_hash, abs_workspace, repo_path):
             current_phase = checkpoint.get_current_phase()
             resume_from_phase = current_phase + 1
-            console.print(f"[green]Resuming from Phase {resume_from_phase}[/green]")
+            display_resume_status(checkpoint_data)
         else:
             console.print("[red]Checkpoint validation failed. Starting fresh.[/red]")
             checkpoint.clear_checkpoint()
