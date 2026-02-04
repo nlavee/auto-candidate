@@ -522,6 +522,16 @@ def start(
         # Initialize repo for later use
         repo = Repo(repo_path)
 
+        # Ensure base branch exists (create if needed for resume)
+        try:
+            # Check if branch exists
+            repo.git.rev_parse('--verify', base_branch)
+            console.print(f"[dim]Base branch '{base_branch}' exists[/dim]")
+        except:
+            # Branch doesn't exist, create it
+            console.print(f"[yellow]Base branch '{base_branch}' not found, creating it...[/yellow]")
+            git_ops.create_branch(repo_path, base_branch)
+
     # --- PHASE 4: MERGE & VERIFY ---
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
     console.print(f"[dim]Integration agent: {integration_agent}[/dim]")
