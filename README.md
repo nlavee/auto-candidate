@@ -220,6 +220,32 @@ AutoCandidate supports checkpointing and resuming from failures. This is helpful
 2. **Resume Mode**: Use `--resume` flag (or enable in interactive mode) to continue from the last checkpoint
 3. **Manual Fixes**: You can make manual fixes between runs (edit code, fix planning docs, etc.)
 4. **Validation**: Checkpoints are validated to ensure compatibility with the current run
+5. **Interrupt Handling**: Press Ctrl-C to gracefully save checkpoint and exit at any time
+
+### Graceful Interrupt (Ctrl-C)
+
+You can interrupt the process at any time using Ctrl-C:
+
+- **First Ctrl-C**: Saves checkpoint for completed phases and exits gracefully
+  - During Phase 3, saves partial progress with completed tasks
+  - Cleans up worktrees for completed tasks
+  - Shows resume instructions
+- **Second Ctrl-C**: Force exits immediately (checkpoint may not be saved)
+
+**Example:**
+```bash
+python auto_candidate/main.py start prompt.md --local-path /path/to/repo
+# ... Phase 3 running, some tasks completed ...
+# Press Ctrl-C
+# [yellow]Interrupt received. Saving checkpoint...[/yellow]
+# [cyan]Cleaning up worktrees for completed tasks...[/cyan]
+# [green]Checkpoint saved for Phase 3 (partial: 5 tasks completed)[/green]
+# [cyan]You can resume with --resume flag[/cyan]
+
+# Resume later
+python auto_candidate/main.py start prompt.md --local-path /path/to/repo --resume
+# Continues from Phase 3, skips completed tasks, runs remaining tasks
+```
 
 ### Usage Examples
 
@@ -259,10 +285,13 @@ python auto_candidate/main.py checkpoint-info --workspace ./workspace
 
 ### What Can Be Resumed
 
+- **After Phase 1**: Initial setup completed, continue to planning
 - **After Phase 2**: Planning completed, continue to execution
-- **During Phase 3**: Some tasks completed, continue with remaining tasks
+- **During Phase 3**: Some tasks completed (via interrupt or failure), continue with remaining tasks
 - **After Phase 3**: All tasks completed, continue to integration/testing
 - **During Phase 4**: Branches merged, continue with testing
+
+**Note:** When interrupted with Ctrl-C during Phase 3, the system saves all completed tasks and allows you to resume with the remaining tasks.
 
 ### Example Workflow
 
