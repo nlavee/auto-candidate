@@ -112,10 +112,35 @@ The easiest way to get started is using the interactive runner:
 This interactive script will guide you through:
 - **Main Operations**: Start a new run, check checkpoint status, clear checkpoints, or view checkpoint details
 - **Run Configuration**: Prompt file location, repository source (local/remote), workspace directory
+- **Path Autocomplete**: Press Tab to autocomplete file and directory paths during input
+- **fzf Integration**: Browse directories interactively with fuzzy search (if fzf is installed)
 - **Agent Selection**: Choose Gemini, Claude, or custom configuration for each phase
 - **Resume Mode**: Automatically detect and resume from checkpoints
 - **Model Selection**: Specify a model or select interactively
 - **Smart Validation**: Checks for required files and API keys before running
+
+### Enhanced Path Input
+
+The interactive mode includes several features to make path entry easier:
+
+**Tab Completion**: Press `Tab` while typing any path to autocomplete:
+```bash
+Enter path to prompt file: prom<Tab>  # Autocompletes to prompt.md
+```
+
+**fzf Integration** (optional): Install `fzf` for an even better experience:
+```bash
+# Ubuntu/Debian
+sudo apt install fzf
+
+# macOS
+brew install fzf
+
+# Arch Linux
+sudo pacman -S fzf
+```
+
+With fzf installed, you can browse directories interactively with fuzzy search when selecting local repositories!
 
 ### Direct Command Mode
 
