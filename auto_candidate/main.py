@@ -1,5 +1,7 @@
 import typer
 import os
+import signal
+import sys
 import concurrent.futures
 import json
 from git import Repo
@@ -22,6 +24,71 @@ from modules.json_utils import extract_json_from_response
 
 app = typer.Typer()
 console = Console()
+
+# Global context for interrupt handling
+interrupt_context = {
+    "checkpoint": None,
+    "current_phase": None,
+    "phase_state": None,
+    "interrupted": False
+}
+
+
+def signal_handler(signum, frame):
+    """Handle Ctrl-C interrupt gracefully by saving checkpoint."""
+    if interrupt_context["interrupted"]:
+        # Second Ctrl-C, force exit
+        console.print("\n[bold red]Force exit. Checkpoint may not be saved.[/bold red]")
+        sys.exit(1)
+
+    interrupt_context["interrupted"] = True
+    console.print("\n[yellow]Interrupt received. Saving checkpoint...[/yellow]")
+
+    checkpoint = interrupt_context.get("checkpoint")
+    current_phase = interrupt_context.get("current_phase")
+    phase_state = interrupt_context.get("phase_state")
+
+    if checkpoint and current_phase is not None and phase_state:
+        try:
+            # Determine which phase to save
+            # If we're in Phase 3 and have partial results, save Phase 3 checkpoint
+            # Otherwise, save the last completed phase (current_phase - 1)
+            if current_phase == 3 and "phase_3_state" in phase_state:
+                # Check if we have any completed tasks
+                task_results = phase_state.get("phase_3_state", {}).get("task_results", [])
+                if task_results:
+                    console.print(f"[cyan]Cleaning up worktrees for completed tasks...[/cyan]")
+                    # Clean up worktrees for completed tasks
+                    workspace = interrupt_context.get("workspace")
+                    repo_path = interrupt_context.get("repo_path")
+                    if workspace and repo_path:
+                        git_ops = GitOperations(workspace)
+                        for res in task_results:
+                            task_id = res["id"]
+                            worktree_path = os.path.join(workspace, f"worktree-{task_id}")
+                            try:
+                                git_ops.cleanup_worktree(repo_path, worktree_path)
+                            except Exception as e:
+                                console.print(f"[dim]Warning: Failed to cleanup worktree for {task_id}: {e}[/dim]")
+
+                    # Mark partial completion for resume
+                    for res in task_results:
+                        res["completed"] = True
+                    checkpoint.save_checkpoint(3, phase_state)
+                    console.print(f"[green]Checkpoint saved for Phase 3 (partial: {len(task_results)} tasks completed)[/green]")
+                elif current_phase > 1:
+                    checkpoint.save_checkpoint(current_phase - 1, phase_state)
+                    console.print(f"[green]Checkpoint saved for Phase {current_phase - 1}[/green]")
+            elif current_phase > 1:
+                checkpoint.save_checkpoint(current_phase - 1, phase_state)
+                console.print(f"[green]Checkpoint saved for Phase {current_phase - 1}[/green]")
+
+            console.print("[cyan]You can resume with --resume flag[/cyan]")
+        except Exception as e:
+            console.print(f"[red]Failed to save checkpoint: {e}[/red]")
+
+    console.print("[yellow]Exiting...[/yellow]")
+    sys.exit(0)
 
 
 def create_provider(provider_name: str, api_key: str, model_name: str) -> BaseLLMProvider:
@@ -198,6 +265,9 @@ def start(
     """
     console.print(Panel.fit("[bold blue]AutoCandidate[/bold blue]\nTask-Based Parallel Solver"))
 
+    # Register signal handler for graceful interrupt
+    signal.signal(signal.SIGINT, signal_handler)
+
     # Load environment variables from .env file if it exists
     load_dotenv()
 
@@ -243,6 +313,12 @@ def start(
     # Initialize checkpoint manager
     checkpoint = CheckpointManager(abs_workspace)
 
+    # Initialize interrupt context for graceful shutdown
+    interrupt_context["checkpoint"] = checkpoint
+    interrupt_context["current_phase"] = 1
+    interrupt_context["phase_state"] = {}
+    interrupt_context["workspace"] = abs_workspace
+
     git_ops = GitOperations(abs_workspace)
     repo_path = ""
     try:
@@ -261,6 +337,9 @@ def start(
                 final_prompt_path = os.path.join(repo_path, prompt_file)
     except Exception:
         raise typer.Exit(1)
+
+    # Update interrupt context with repo path
+    interrupt_context["repo_path"] = repo_path
 
     if not os.path.exists(final_prompt_path):
         console.print(f"[bold red]Prompt file not found: {final_prompt_path}[/bold red]")
@@ -301,7 +380,7 @@ def start(
         console.print("[dim]Phase 1: Loaded from checkpoint[/dim]")
     else:
         # Save Phase 1 checkpoint
-        checkpoint.save_checkpoint(1, {
+        phase_1_state = {
             "workspace": abs_workspace,
             "repo_path": repo_path,
             "prompt_file": final_prompt_path,
@@ -314,9 +393,12 @@ def start(
                 "integration_agent": integration_agent,
                 "verification_agent": verification_agent
             }
-        })
+        }
+        checkpoint.save_checkpoint(1, phase_1_state)
+        interrupt_context["phase_state"] = phase_1_state
 
     # --- PHASE 2: PLANNING ---
+    interrupt_context["current_phase"] = 2
     if resume_from_phase <= 2:
         console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
         console.print(f"[dim]Planning agent: {planning_agent}[/dim]")
@@ -406,7 +488,7 @@ def start(
         console.print(task_table)
 
         # Save Phase 2 checkpoint
-        checkpoint.save_checkpoint(2, {
+        phase_2_state = {
             "phase_2_state": {
                 "plan_data": plan_data,
                 "master_plan_file": "MASTER_PLAN.md",
@@ -414,7 +496,9 @@ def start(
                 "selected_model": selected_model,
                 "context_str_length": len(context_str)
             }
-        })
+        }
+        checkpoint.save_checkpoint(2, phase_2_state)
+        interrupt_context["phase_state"] = phase_2_state
     else:
         # Load planning data from checkpoint
         console.print("[dim]Phase 2: Loading from checkpoint...[/dim]")
@@ -442,6 +526,7 @@ def start(
         console.print(f"[green]Loaded {len(tasks)} tasks from checkpoint[/green]")
 
     # --- PHASE 3: EXECUTION ---
+    interrupt_context["current_phase"] = 3
     if resume_from_phase <= 3:
         console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
         console.print(f"[dim]Execution agent: {execution_agent}[/dim]")
@@ -497,6 +582,13 @@ def start(
                     try:
                         data = future.result()
                         results.append(data)
+                        # Update interrupt context with partial progress
+                        interrupt_context["phase_state"] = {
+                            "phase_3_state": {
+                                "base_branch": base_branch,
+                                "task_results": results
+                            }
+                        }
                     except Exception as exc:
                         console.print(f"[red]Task exception: {exc}[/red]")
 
@@ -515,12 +607,14 @@ def start(
                 console.print(f"[yellow]Warning: Failed to cleanup worktree for {task_id}: {e}[/yellow]")
 
         # Save Phase 3 checkpoint
-        checkpoint.save_checkpoint(3, {
+        phase_3_state = {
             "phase_3_state": {
                 "base_branch": base_branch,
                 "task_results": results
             }
-        })
+        }
+        checkpoint.save_checkpoint(3, phase_3_state)
+        interrupt_context["phase_state"] = phase_3_state
     else:
         # Load execution results from checkpoint
         console.print("[dim]Phase 3: Loading from checkpoint...[/dim]")
@@ -543,6 +637,7 @@ def start(
             git_ops.create_branch(repo_path, base_branch)
 
     # --- PHASE 4: MERGE & VERIFY ---
+    interrupt_context["current_phase"] = 4
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
     console.print(f"[dim]Integration agent: {integration_agent}[/dim]")
     console.print(f"[dim]Verification agent: {verification_agent}[/dim]")
