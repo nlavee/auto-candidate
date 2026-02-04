@@ -135,6 +135,7 @@ def start(
     execution_agent: str = typer.Option("gemini", help="Agent for execution phase: gemini or claude"),
     integration_agent: str = typer.Option("gemini", help="Agent for integration phase: gemini or claude"),
     verification_agent: str = typer.Option("gemini", help="Agent for verification phase: gemini or claude"),
+    resume: bool = typer.Option(False, help="Resume from previous checkpoint if available"),
 ):
     """
     AutoCandidate: Task-Based Parallel Solver
@@ -214,6 +215,26 @@ def start(
 
     # Calculate prompt hash for checkpoint validation
     prompt_hash = calculate_prompt_hash(final_prompt_path)
+
+    # Check for existing checkpoint and handle resume
+    resume_from_phase = 1
+    checkpoint_data = None
+
+    if resume and checkpoint.checkpoint_exists():
+        console.print("[cyan]Found existing checkpoint. Loading...[/cyan]")
+        checkpoint_data = checkpoint.load_checkpoint()
+
+        # Validate checkpoint
+        if checkpoint.validate_checkpoint(prompt_hash, abs_workspace, repo_path):
+            current_phase = checkpoint.get_current_phase()
+            resume_from_phase = current_phase + 1
+            console.print(f"[green]Resuming from Phase {resume_from_phase}[/green]")
+        else:
+            console.print("[red]Checkpoint validation failed. Starting fresh.[/red]")
+            checkpoint.clear_checkpoint()
+            checkpoint_data = None
+    elif checkpoint.checkpoint_exists() and not resume:
+        console.print("[yellow]Checkpoint exists but --resume not specified. Starting fresh.[/yellow]")
 
     # Save Phase 1 checkpoint
     checkpoint.save_checkpoint(1, {
