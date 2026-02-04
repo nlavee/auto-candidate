@@ -81,3 +81,103 @@ class GitOperations:
         except Exception as e:
             console.print(f"[red]Error managing branches: {e}[/red]")
             raise
+
+    def setup_worktree(self, repo_path: str, branch_name: str, worktree_path: str) -> str:
+        """
+        Creates a new worktree for the given branch at worktree_path.
+        Returns the absolute path to the worktree.
+        """
+        try:
+            repo = Repo(repo_path)
+            # Ensure worktree_path is absolute
+            worktree_abs = os.path.abspath(worktree_path)
+            
+            # If path exists, clean it up
+            if os.path.exists(worktree_abs):
+                # Git worktree prune might be needed if we just rm -rf
+                repo.git.worktree('prune')
+                shutil.rmtree(worktree_abs, ignore_errors=True)
+
+            console.print(f"[cyan]Creating worktree for {branch_name} at {worktree_abs}...[/cyan]")
+            
+            # Use git command directly for worktree
+            # -b creates the branch if it doesn't exist
+            # If branch exists, we might need logic to just checkout, 
+            # but -B forces creation/reset which is good for a clean start.
+            repo.git.worktree('add', '-f', '-B', branch_name, worktree_abs)
+            
+            console.print(f"[green]✔ Worktree ready at {worktree_abs}[/green]")
+            return worktree_abs
+        except GitCommandError as e:
+            console.print(f"[red]Failed to create worktree: {e}[/red]")
+            raise
+
+    def merge_feature_branch(self, repo_path: str, target_branch: str, source_branch: str, resolver=None, plan_context: str = "") -> bool:
+        """
+        Merges source_branch into target_branch.
+        Returns True if successful.
+        If resolver is provided, attempts to resolve conflicts using LLM.
+        """
+        try:
+            repo = Repo(repo_path)
+            
+            # Checkout target
+            repo.git.checkout(target_branch)
+            
+            console.print(f"[cyan]Merging {source_branch} into {target_branch}...[/cyan]")
+            try:
+                repo.git.merge(source_branch)
+                console.print(f"[green]✔ Merged {source_branch}[/green]")
+                return True
+            except GitCommandError:
+                if not resolver:
+                    raise # Rethrow if no resolver
+                
+                console.print(f"[yellow]Conflict detected! Attempting AI Resolution...[/yellow]")
+                
+                # Identify conflicted files
+                # Using git diff to get simple list of filenames
+                conflicted_files = repo.git.diff('--name-only', '--diff-filter=U').splitlines()
+                
+                if not conflicted_files:
+                     # Maybe it was another error?
+                     raise
+                
+                for file_path in conflicted_files:
+                    full_path = os.path.join(repo_path, file_path)
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Ask LLM to resolve
+                        resolved_content = resolver.resolve_conflict({
+                            "file_path": file_path,
+                            "conflict_content": content
+                        }, plan_context=plan_context)
+                        
+                        if resolved_content:
+                            with open(full_path, 'w', encoding='utf-8') as f:
+                                f.write(resolved_content)
+                            repo.git.add(file_path)
+                            console.print(f"[green]✔ Resolved {file_path}[/green]")
+                        else:
+                            console.print(f"[red]Failed to resolve {file_path} (Empty response)[/red]")
+                            repo.git.merge('--abort')
+                            return False
+                    except Exception as e:
+                        console.print(f"[red]Error resolving {file_path}: {e}[/red]")
+                        repo.git.merge('--abort')
+                        return False
+                
+                # Final commit
+                repo.git.commit('-m', f"Merge {source_branch} (AI Resolved)")
+                console.print(f"[green]✔ Merge committed.[/green]")
+                return True
+                
+        except GitCommandError as e:
+            console.print(f"[red]Merge failed for {source_branch}: {e}[/red]")
+            try:
+                repo.git.merge('--abort')
+            except:
+                pass
+            return False

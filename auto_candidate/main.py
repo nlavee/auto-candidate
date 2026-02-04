@@ -1,14 +1,111 @@
 import typer
 import os
+import concurrent.futures
+import json
 from git import Repo
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from modules.prerequisites import PrerequisiteChecker
 from modules.git_ops import GitOperations
+from modules.inspector import ContextBuilder
+from modules.llm_engine import GeminiPlanner
+from modules.coder import FilePatcher
+from modules.quality import QualityGate
 
 app = typer.Typer()
 console = Console()
+
+def process_task(
+    task: Dict[str, Any],
+    base_repo_path: str,
+    base_branch: str,
+    workspace_dir: str,
+    api_key: str,
+    model_name: str,
+    context_str: str,
+    plan_overview: str,
+    task_spec: str
+) -> Dict[str, Any]:
+    """
+    Executes a single task in its own git worktree.
+    """
+    task_id = task.get("id", "unknown")
+    task_title = task.get("title", "Untitled")
+    feature_branch = f"feat/{task_id}"
+    worktree_path = os.path.join(workspace_dir, f"worktree-{task_id}")
+    
+    prefix = f"[{task_id}]"
+    console.print(f"[cyan]{prefix} Starting: {task_title}...[/cyan]")
+
+    try:
+        git_ops = GitOperations(workspace_dir)
+        
+        # 1. Create Feature Branch
+        repo = Repo(base_repo_path)
+        if feature_branch not in repo.heads:
+            base_commit = repo.heads[base_branch].commit
+            repo.create_head(feature_branch, base_commit)
+        else:
+            repo.heads[feature_branch].set_commit(repo.heads[base_branch].commit)
+
+        # 2. Setup Worktree
+        git_ops.setup_worktree(base_repo_path, feature_branch, worktree_path)
+
+        # 3. Generate Code
+        planner = GeminiPlanner(api_key=api_key, model_name=model_name)
+        code_response = planner.execute_task(
+            task, 
+            context_str, 
+            plan_overview=plan_overview, 
+            task_spec=task_spec
+        )
+        
+        if not code_response:
+            console.print(f"[red]{prefix} Code generation failed.[/red]")
+            return {
+                "id": task_id,
+                "status": "FAILED",
+                "branch": feature_branch,
+                "error": "LLM Gen Failed"
+            }
+
+        # 4. Apply Code
+        patcher = FilePatcher(worktree_path)
+        modified = patcher.apply_patches(code_response)
+        console.print(f"[green]{prefix} Applied {len(modified)} files[/green]")
+        
+        if not modified:
+             console.print(f"[yellow]{prefix} No files modified.[/yellow]")
+
+        # 5. Local Verification
+        gate = QualityGate()
+        lint_success, _ = gate.run_linter(worktree_path)
+        
+        # Commit
+        if modified:
+            wt_repo = Repo(worktree_path)
+            wt_repo.git.add(all=True)
+            wt_repo.index.commit(f"Implement {task_title}")
+            console.print(f"[green]{prefix} Committed changes[/green]")
+
+        return {
+            "id": task_id,
+            "status": "SUCCESS" if lint_success else "WARN",
+            "branch": feature_branch,
+            "files_changed": len(modified),
+            "lint": lint_success
+        }
+
+    except Exception as e:
+        console.print(f"[bold red]{prefix} Critical Error: {e}[/bold red]")
+        return {
+            "id": task_id,
+            "status": "ERROR",
+            "branch": feature_branch,
+            "error": str(e)
+        }
 
 @app.command()
 def start(
@@ -16,76 +113,60 @@ def start(
     repo_url: Optional[str] = typer.Option(None, help="The URL of the Github repository to clone"),
     local_path: Optional[str] = typer.Option(None, help="Path to a local directory to use instead of a remote repo"),
     workspace: str = typer.Option("./workspace", help="Directory where the project will be built"),
-    versions: int = typer.Option(2, help="Number of solution versions to attempt"),
-    model: str = typer.Option(None, help="Gemini model to use (e.g. gemini-1.5-flash). Skips interactive selection.")
+    versions: int = typer.Option(1, help="Number of solution versions (Ignored in task mode, default 1)"),
+    model: str = typer.Option(None, help="Gemini model to use. Skips interactive selection.")
 ):
     """
-    AutoCandidate: Automated Take-Home Challenge Solver
+    AutoCandidate: Task-Based Parallel Solver
     """
-    console.print(Panel.fit("[bold blue]AutoCandidate[/bold blue]\nAutomated Take-Home Challenge Assistant"))
+    console.print(Panel.fit("[bold blue]AutoCandidate[/bold blue]\nTask-Based Parallel Solver"))
 
+    # ... Setup ...
     if not repo_url and not local_path:
         console.print("[bold red]Error: You must provide either --repo-url or --local-path.[/bold red]")
         raise typer.Exit(code=1)
-
     if repo_url and local_path:
-        console.print("[bold red]Error: Please provide only one of --repo-url or --local-path, not both.[/bold red]")
+        console.print("[bold red]Error: Please provide only one.[/bold red]")
         raise typer.Exit(code=1)
 
-    # 1. Prerequisites Check
     checker = PrerequisiteChecker()
     api_key = checker.check_api_key()
     if not checker.check_docker():
-        console.print("[yellow]Warning: Docker check failed. Continuing, but build/test steps might fail.[/yellow]")
+        console.print("[yellow]Warning: Docker check failed.[/yellow]")
 
-    # 2. Setup Workspace
     abs_workspace = os.path.abspath(workspace)
     if not os.path.exists(abs_workspace):
         os.makedirs(abs_workspace)
     
-    # 3. Setup Project Source (Clone or Copy)
     git_ops = GitOperations(abs_workspace)
     repo_path = ""
-    
     try:
         if repo_url:
             repo_path = git_ops.clone_repo(repo_url)
-            # When cloning, prompt_file is expected to be a path provided by user
             final_prompt_path = prompt_file
         else:
-            # Local path mode
             abs_local_path = os.path.abspath(local_path)
             if not os.path.exists(abs_local_path):
                 console.print(f"[bold red]Local path not found: {abs_local_path}[/bold red]")
-                raise typer.Exit(code=1)
-                
+                raise typer.Exit(1)
             repo_path = git_ops.copy_repo(abs_local_path)
-            
-            # Resolve prompt file
             if os.path.isabs(prompt_file) or os.path.dirname(prompt_file):
                 final_prompt_path = prompt_file
             else:
                 final_prompt_path = os.path.join(repo_path, prompt_file)
-                
     except Exception:
-        raise typer.Exit(code=1)
+        raise typer.Exit(1)
 
-    # 4. Verify Prompt File
     if not os.path.exists(final_prompt_path):
         console.print(f"[bold red]Prompt file not found: {final_prompt_path}[/bold red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(1)
 
     with open(final_prompt_path, "r") as f:
         prompt_text = f.read()
 
-    console.print(f"[green]✔ Setup complete. Ready to analyze {repo_path}[/green]")
-
-    # --- PHASE 2: ANALYSIS & PLANNING ---
-    console.print(Panel("[bold]Phase 2: Analysis & Planning[/bold]", border_style="blue"))
+    # --- PHASE 2: PLANNING ---
+    console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
     
-    from modules.inspector import ContextBuilder
-    from modules.llm_engine import GeminiPlanner
-
     # Model Selection
     selected_model = model
     if not selected_model:
@@ -108,107 +189,176 @@ def start(
         
     console.print(f"[green]Using model: {selected_model}[/green]\n")
 
-    # Build Context
-    console.print("[cyan]Analyzing codebase structure...[/cyan]")
     builder = ContextBuilder(repo_path)
     context_str = builder.get_context_string()
     
-    # Generate Plans
     planner = GeminiPlanner(api_key=api_key, model_name=selected_model)
-    plans = planner.generate_plans(prompt_text, context_str, num_versions=versions)
+    
+    plan_data = planner.create_task_breakdown(prompt_text, context_str)
+    tasks = plan_data.get("tasks", [])
+    plan_overview = plan_data.get("plan_overview", "")
 
-    if not plans:
-        console.print("[red]Failed to generate plans. Exiting.[/red]")
-        raise typer.Exit(code=1)
+    if not tasks:
+        console.print("[red]Failed to generate valid tasks. Exiting.[/red]")
+        raise typer.Exit(1)
 
-    # Save and Display Plans
-    for i, plan_content in enumerate(plans, 1):
-        plan_file = os.path.join(abs_workspace, f"plan_v{i}.txt")
-        with open(plan_file, "w") as f:
-            f.write(plan_content)
-        
-        console.print(Panel(f"Plan v{i} saved to {plan_file}", title=f"Strategy {i}", border_style="green"))
-        # Briefly show the first few lines of the plan
-        summary = "\n".join(plan_content.splitlines()[:10]) + "\n..."
-        console.print(f"[dim]{summary}[/dim]")
+    master_doc = planner.create_master_plan_doc(plan_data, context_str)
+    
+    sub_plan_docs = {}
+    for t in tasks:
+        doc = planner.create_task_spec_doc(t, master_doc, context_str)
+        sub_plan_docs[t["id"]] = doc
 
-    console.print(f"[bold green]✔ Planning complete. Generated {len(plans)} strategies.[/bold green]")
+    review_result = planner.review_and_refine_plan(plan_data, master_doc, sub_plan_docs)
+    if review_result != "OK":
+        console.print("[yellow]Plan refinement triggered by Architect...[/yellow]")
+        try:
+            cleaned = review_result.replace("```json", "").replace("```", "").strip()
+            new_plan_data = json.loads(cleaned)
+            tasks = new_plan_data.get("tasks", [])
+            plan_overview = new_plan_data.get("plan_overview", plan_overview)
+            console.print(f"[green]Plan refined. New task count: {len(tasks)}[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to parse refined plan: {e}. Reverting to original.[/red]")
+
+    with open(os.path.join(abs_workspace, "MASTER_PLAN.md"), "w") as f:
+        f.write(master_doc)
+    
+    for t_id, doc in sub_plan_docs.items():
+        clean_id = "".join(c for c in t_id if c.isalnum() or c in ('-','_'))
+        with open(os.path.join(abs_workspace, f"PLAN_{clean_id}.md"), "w") as f:
+            f.write(doc)
+
+    console.print(f"\n[bold]Plan Overview:[/bold] {plan_overview}\n")
+    task_table = Table(title="Execution Tasks")
+    task_table.add_column("ID", style="cyan")
+    task_table.add_column("Task", style="bold")
+    task_table.add_column("Target Files")
+    for t in tasks:
+        task_table.add_row(t.get("id"), t.get("title"), ", ".join(t.get("target_files", [])[:3]))
+    console.print(task_table)
 
     # --- PHASE 3: EXECUTION ---
-    console.print(Panel("[bold]Phase 3: Automated Implementation[/bold]", border_style="magenta"))
-    from modules.coder import FilePatcher
-    from modules.quality import QualityGate
-
-    patcher = FilePatcher(abs_workspace)
-    gate = QualityGate()
+    console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
     
-    # Detect default branch (usually main or master)
+    base_branch = "solution-v1"
     try:
         repo = Repo(repo_path)
-        default_branch = repo.active_branch.name
-    except:
-        default_branch = "main"
+        git_ops.create_branch(repo_path, base_branch) 
+    except Exception as e:
+        console.print(f"[red]Git setup error: {e}[/red]")
+        raise typer.Exit(1)
 
     results = []
-
-    for i, plan_content in enumerate(plans, 1):
-        version_name = f"solution-v{i}"
-        console.print(f"\n[bold cyan]=== Implementing Version {i}: {version_name} ===[/bold cyan]")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        future_to_task = {
+            executor.submit(
+                process_task, 
+                t, 
+                repo_path, 
+                base_branch, 
+                abs_workspace, 
+                api_key, 
+                selected_model, 
+                context_str,
+                master_doc, 
+                sub_plan_docs.get(t["id"], "")
+            ): t 
+            for t in tasks
+        }
         
-        # 1. Reset to clean state
-        try:
-            repo.git.checkout(default_branch)
-            git_ops.create_branch(repo_path, version_name)
-        except Exception as e:
-            console.print(f"[red]Git Error: {e}[/red]")
-            continue
+        for future in concurrent.futures.as_completed(future_to_task):
+            try:
+                data = future.result()
+                results.append(data)
+            except Exception as exc:
+                console.print(f"[red]Task exception: {exc}[/red]")
 
-        # 2. Generate Code
-        code_response = planner.generate_code(plan_content, context_str)
-        if not code_response:
-            console.print(f"[red]Skipping {version_name} due to generation failure.[/red]")
-            continue
+    # --- PHASE 4: MERGE & VERIFY ---
+    console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
+    
+    successful_tasks = [r for r in results if r["status"] in ["SUCCESS", "WARN"]]
+    successful_tasks.sort(key=lambda x: x["id"])
+    
+    merge_success_count = 0
+    for res in successful_tasks:
+        if git_ops.merge_feature_branch(
+            repo_path, 
+            base_branch, 
+            res["branch"], 
+            resolver=planner,
+            plan_context=master_doc
+        ):
+            merge_success_count += 1
+    
+    console.print(f"\n[green]Merged {merge_success_count}/{len(successful_tasks)} feature branches into {base_branch}[/green]")
+    
+    # Final Verification Loop
+    gate = QualityGate()
+    repo_patcher = FilePatcher(repo_path)
+
+    console.print("[cyan]Running Final Integration Tests...[/cyan]")
+    gate.install_dependencies(repo_path)
+    
+    max_retries = 2
+    tests_passed = False
+    test_log = ""
+
+    for attempt in range(max_retries + 1):
+        success, output = gate.run_tests(repo_path)
+        test_log = output
+        
+        if success:
+            tests_passed = True
+            break
+        
+        if attempt < max_retries:
+            console.print(Panel(output[-1000:], title=f"[yellow]Tests Failed (Attempt {attempt+1}/{max_retries+1}). Fix requested...[/yellow]", border_style="yellow"))
             
-        # 3. Apply Code
-        modified = patcher.apply_patches(code_response)
-        console.print(f"[green]✔ Applied {len(modified)} files to branch {version_name}[/green]")
-        
-        # 4. Verification
-        gate.install_dependencies(repo_path)
-        test_success, test_log = gate.run_tests(repo_path)
-        lint_success, lint_log = gate.run_linter(repo_path)
-        
-        results.append({
-            "version": version_name,
-            "tests": "PASS" if test_success else "FAIL",
-            "lint": "PASS" if lint_success else "WARN",
-            "files_changed": len(modified)
-        })
+            new_context = builder.get_context_string()
+            fix_response = planner.fix_code(output, prompt_text, new_context)
+            
+            if fix_response:
+                try:
+                    fixed_files = repo_patcher.apply_patches(fix_response)
+                    if fixed_files:
+                        console.print(f"[green]Applied fixes to {len(fixed_files)} files.[/green]")
+                        repo.git.add(all=True)
+                        repo.git.commit('-m', f"Auto-fix test failures (Attempt {attempt+1})")
+                    else:
+                        console.print("[red]LLM returned no fixes.[/red]")
+                        break
+                except Exception as e:
+                    console.print(f"[red]Error applying fixes: {e}[/red]")
+                    break
+            else:
+                console.print("[red]LLM failed to generate a fix.[/red]")
+                break
+        else:
+            console.print("[bold red]Max retries reached. Tests still failing.[/bold red]")
 
-    # --- PHASE 4: SUMMARY REPORT ---
-    console.print("\n")
-    console.print(Panel("[bold]Final Report[/bold]", border_style="green"))
-    
-    from rich.table import Table
-    table = Table(title="Solution Candidates")
-    table.add_column("Branch", style="cyan")
-    table.add_column("Files Changed", justify="right")
-    table.add_column("Tests", style="bold")
-    table.add_column("Linting", style="bold")
-    
-    for res in results:
-        test_style = "green" if res["tests"] == "PASS" else "red"
-        lint_style = "green" if res["lint"] == "PASS" else "yellow"
-        table.add_row(
-            res["version"], 
-            str(res["files_changed"]),
-            f"[{test_style}]{res['tests']}[/{test_style}]", 
-            f"[{lint_style}]{res['lint']}[/{lint_style}]"
-        )
-    
-    consola.print(table)
-    console.print(f"[dim]To review a solution: cd {workspace} && git checkout solution-v1[/dim]")
+    if not tests_passed:
+        console.print(Panel(test_log, title="[bold red]Final Test Failures[/bold red]", border_style="red"))
+        
+        failure_report_path = os.path.join(abs_workspace, "FAILURE_REPORT.md")
+        with open(failure_report_path, "w") as f:
+            f.write(f"# AutoCandidate Failure Report\n\n## Test Output\n```\n{test_log}\n```\n")
+        console.print(f"[yellow]Failure report saved to: {failure_report_path}[/yellow]")
+        console.print("[bold red]Action Required: Please review the failures manually.[/bold red]")
+    else:
+        console.print("[bold green]All Tests Passed![/bold green]")
+        
+        verify_report = planner.verify_solution(prompt_text, builder.get_context_string(), test_log)
+        verify_path = os.path.join(abs_workspace, "VERIFICATION_REPORT.md")
+        with open(verify_path, "w") as f:
+            f.write(verify_report)
+        
+        console.print(Panel(verify_report, title="Requirement Verification", border_style="blue"))
+        console.print(f"[dim]Verification report saved to: {verify_path}[/dim]")
 
+    console.print(f"[dim]Project located at: {repo_path}[/dim]")
+    console.print(f"[dim]To inspect: cd {workspace}/target_repo && git checkout {base_branch}[/dim]")
 
 if __name__ == "__main__":
     app()
