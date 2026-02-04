@@ -48,14 +48,14 @@ To solve a challenge defined in `prompt.md` using a local repository:
 
 ```bash
 source venv/bin/activate
-python main.py start prompt.md --local-path /path/to/challenge/repo
+python auto_candidate/main.py start prompt.md --local-path /path/to/challenge/repo
 ```
 
 To solve a challenge from a remote Git URL:
 
 ```bash
 source venv/bin/activate
-python main.py start prompt.md --repo-url https://github.com/username/challenge-repo.git
+python auto_candidate/main.py start prompt.md --repo-url https://github.com/username/challenge-repo.git
 ```
 
 ### Options
