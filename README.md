@@ -85,6 +85,7 @@ python auto_candidate/main.py start prompt.md --repo-url https://github.com/user
 *   `--execution-agent`: Agent for execution phase: `gemini` or `claude` (default: `gemini`).
 *   `--integration-agent`: Agent for integration phase: `gemini` or `claude` (default: `gemini`).
 *   `--verification-agent`: Agent for verification phase: `gemini` or `claude` (default: `gemini`).
+*   `--resume`: Resume from previous checkpoint if available (default: `False`).
 
 ## Multi-Agent Support
 
@@ -127,6 +128,82 @@ python auto_candidate/main.py start prompt.md --local-path /path/to/repo
 The system will automatically check for the required API keys based on which agents you select:
 - If using `gemini` for any phase: `GEMINI_API_KEY` must be set
 - If using `claude` for any phase: `ANTHROPIC_API_KEY` must be set
+
+## Checkpoint and Resume
+
+AutoCandidate now supports checkpointing and resuming from failures. This is helpful for long-running tasks where you want to fix issues and continue without starting from scratch.
+
+### How It Works
+
+1. **Automatic Checkpoints**: The system automatically saves checkpoints after each phase completes
+2. **Resume Flag**: Use `--resume` to continue from the last checkpoint
+3. **Manual Fixes**: You can make manual fixes between runs (edit code, fix planning docs, etc.)
+4. **Validation**: Checkpoints are validated to ensure compatibility with the current run
+
+### Usage Examples
+
+**Start a new run (creates checkpoints automatically):**
+```bash
+python auto_candidate/main.py start prompt.md --local-path /path/to/repo
+```
+
+**Resume from last checkpoint after a failure:**
+```bash
+python auto_candidate/main.py start prompt.md --local-path /path/to/repo --resume
+```
+
+**Check checkpoint status:**
+```bash
+python auto_candidate/main.py checkpoint-status --workspace ./workspace
+```
+
+**Clear checkpoint (start fresh):**
+```bash
+python auto_candidate/main.py checkpoint-clear --workspace ./workspace
+```
+
+**View detailed checkpoint information:**
+```bash
+python auto_candidate/main.py checkpoint-info --workspace ./workspace
+```
+
+### What Can Be Resumed
+
+- **After Phase 2**: Planning completed, continue to execution
+- **During Phase 3**: Some tasks completed, continue with remaining tasks
+- **After Phase 3**: All tasks completed, continue to integration/testing
+- **During Phase 4**: Branches merged, continue with testing
+
+### Example Workflow
+
+1. Start a run that fails during execution:
+   ```bash
+   python auto_candidate/main.py start prompt.md --local-path /path/to/repo
+   # ... Phase 3 fails on task_03 ...
+   ```
+
+2. Investigate the failure:
+   ```bash
+   cd workspace/worktree-task_03
+   # Fix the code manually
+   git add . && git commit -m "Manual fix"
+   ```
+
+3. Resume from checkpoint:
+   ```bash
+   python auto_candidate/main.py start prompt.md --local-path /path/to/repo --resume
+   # Continues from Phase 3, skips completed tasks
+   ```
+
+### Checkpoint File Location
+
+Checkpoints are stored in: `{workspace}/.autocandidate_checkpoint.json`
+
+This file contains:
+- Current phase and progress
+- Configuration (agents, model)
+- Task results and status
+- Planning artifacts metadata
 
 ## Output Artifacts
 
