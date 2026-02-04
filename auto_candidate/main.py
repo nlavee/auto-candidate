@@ -18,6 +18,7 @@ from modules.providers.claude_provider import ClaudeProvider
 from modules.coder import FilePatcher
 from modules.quality import QualityGate
 from modules.checkpoint import CheckpointManager, calculate_prompt_hash
+from modules.json_utils import extract_json_from_response
 
 app = typer.Typer()
 console = Console()
@@ -377,13 +378,15 @@ def start(
         if review_result != "OK":
             console.print("[yellow]Plan refinement triggered by Architect...[/yellow]")
             try:
-                cleaned = review_result.replace("```json", "").replace("```", "").strip()
-                new_plan_data = json.loads(cleaned)
-                tasks = new_plan_data.get("tasks", [])
-                plan_overview = new_plan_data.get("plan_overview", plan_overview)
-                console.print(f"[green]Plan refined. New task count: {len(tasks)}[/green]")
+                new_plan_data = extract_json_from_response(review_result)
+                if new_plan_data:
+                    tasks = new_plan_data.get("tasks", [])
+                    plan_overview = new_plan_data.get("plan_overview", plan_overview)
+                    console.print(f"[green]Plan refined. New task count: {len(tasks)}[/green]")
+                else:
+                    console.print(f"[red]Failed to parse refined plan. Reverting to original.[/red]")
             except Exception as e:
-                console.print(f"[red]Failed to parse refined plan: {e}. Reverting to original.[/red]")
+                console.print(f"[red]Error processing refined plan: {e}. Reverting to original.[/red]")
 
         with open(os.path.join(abs_workspace, "MASTER_PLAN.md"), "w") as f:
             f.write(master_doc)

@@ -9,6 +9,7 @@ import time
 import google.generativeai as genai
 from rich.console import Console
 from .base_provider import BaseLLMProvider
+from ..json_utils import extract_json_with_fallback
 
 console = Console()
 
@@ -153,15 +154,7 @@ class GeminiProvider(BaseLLMProvider):
 
         try:
             response_text = self._call_cli(user_message, system_instruction)
-
-            # Clean up potential markdown fences if the model ignores instructions
-            cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
-
-            return json.loads(cleaned_text)
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Failed to parse plan JSON: {e}[/red]")
-            console.print(f"[dim]Raw: {response_text[:500]}...[/dim]")
-            return {}
+            return extract_json_with_fallback(response_text, fallback={}, log_failure=True)
         except Exception as e:
             console.print(f"[bold red]Gemini Execution Error:[/bold red] {e}")
             return {}
