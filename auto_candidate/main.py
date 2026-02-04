@@ -504,6 +504,16 @@ def start(
         for res in results:
             res["completed"] = True
 
+        # Clean up worktrees after all tasks complete
+        console.print("[cyan]Cleaning up worktrees...[/cyan]")
+        for res in results:
+            task_id = res["id"]
+            worktree_path = os.path.join(abs_workspace, f"worktree-{task_id}")
+            try:
+                git_ops.cleanup_worktree(repo_path, worktree_path)
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to cleanup worktree for {task_id}: {e}[/yellow]")
+
         # Save Phase 3 checkpoint
         checkpoint.save_checkpoint(3, {
             "phase_3_state": {
@@ -536,6 +546,32 @@ def start(
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
     console.print(f"[dim]Integration agent: {integration_agent}[/dim]")
     console.print(f"[dim]Verification agent: {verification_agent}[/dim]")
+
+    # When resuming, ensure worktrees are cleaned up and branches are accessible
+    if resume_from_phase == 4:
+        console.print("[cyan]Verifying worktrees and branches...[/cyan]")
+        for res in results:
+            task_id = res["id"]
+            worktree_path = os.path.join(abs_workspace, f"worktree-{task_id}")
+
+            # Clean up any remaining worktrees
+            if os.path.exists(worktree_path):
+                console.print(f"[yellow]Found stale worktree for {task_id}, cleaning up...[/yellow]")
+                try:
+                    git_ops.cleanup_worktree(repo_path, worktree_path)
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to cleanup worktree for {task_id}: {e}[/yellow]")
+
+            # Verify branch exists in main repo
+            branch_name = res["branch"]
+            try:
+                repo.git.rev_parse('--verify', branch_name)
+            except:
+                console.print(f"[yellow]Warning: Branch {branch_name} not found in main repo[/yellow]")
+                # Branch doesn't exist - this shouldn't happen after proper cleanup
+                # Mark this result as failed so it won't be merged
+                res["status"] = "ERROR"
+                res["error"] = "Branch not found after cleanup"
 
     # Create integration provider for merge conflict resolution and fixing
     integration_api_key = gemini_key if integration_agent == "gemini" else claude_key

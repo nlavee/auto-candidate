@@ -91,26 +91,58 @@ class GitOperations:
             repo = Repo(repo_path)
             # Ensure worktree_path is absolute
             worktree_abs = os.path.abspath(worktree_path)
-            
-            # If path exists, clean it up
+
+            # If path exists, clean it up properly
             if os.path.exists(worktree_abs):
-                # Git worktree prune might be needed if we just rm -rf
-                repo.git.worktree('prune')
-                shutil.rmtree(worktree_abs, ignore_errors=True)
+                console.print(f"[yellow]Worktree path exists, cleaning up...[/yellow]")
+                try:
+                    # Try to remove using git worktree remove first
+                    repo.git.worktree('remove', '-f', worktree_abs)
+                except GitCommandError:
+                    # If that fails, manually remove and prune
+                    shutil.rmtree(worktree_abs, ignore_errors=True)
+                    repo.git.worktree('prune')
 
             console.print(f"[cyan]Creating worktree for {branch_name} at {worktree_abs}...[/cyan]")
-            
+
             # Use git command directly for worktree
             # -b creates the branch if it doesn't exist
-            # If branch exists, we might need logic to just checkout, 
+            # If branch exists, we might need logic to just checkout,
             # but -B forces creation/reset which is good for a clean start.
             repo.git.worktree('add', '-f', '-B', branch_name, worktree_abs)
-            
+
             console.print(f"[green]✔ Worktree ready at {worktree_abs}[/green]")
             return worktree_abs
         except GitCommandError as e:
             console.print(f"[red]Failed to create worktree: {e}[/red]")
             raise
+
+    def cleanup_worktree(self, repo_path: str, worktree_path: str) -> None:
+        """
+        Properly removes a worktree using git worktree remove.
+        This ensures the branch commits are preserved in the main repo.
+        """
+        try:
+            repo = Repo(repo_path)
+            worktree_abs = os.path.abspath(worktree_path)
+
+            if os.path.exists(worktree_abs):
+                console.print(f"[dim]Cleaning up worktree at {worktree_abs}...[/dim]")
+                # Use git worktree remove instead of rmtree to properly clean up
+                repo.git.worktree('remove', '-f', worktree_abs)
+                console.print(f"[green]✔ Worktree cleaned up[/green]")
+            else:
+                # If directory doesn't exist, prune stale metadata
+                repo.git.worktree('prune')
+        except GitCommandError as e:
+            console.print(f"[yellow]Warning: Failed to cleanup worktree: {e}[/yellow]")
+            # Fallback to manual cleanup
+            if os.path.exists(worktree_abs):
+                shutil.rmtree(worktree_abs, ignore_errors=True)
+            try:
+                repo.git.worktree('prune')
+            except:
+                pass
 
     def merge_feature_branch(self, repo_path: str, target_branch: str, source_branch: str, resolver=None, plan_context: str = "") -> bool:
         """
