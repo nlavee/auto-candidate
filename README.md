@@ -36,16 +36,26 @@ AutoCandidate is an autonomous CLI agent designed to solve take-home coding chal
     ```
 
 3.  **Configure Environment:**
-    Create a `.env` file in the `auto_candidate` directory or export the variables:
-    ```bash
-    # For Gemini agent
-    export GEMINI_API_KEY="your_gemini_api_key_here"
+    Set API keys either via environment variables or a `.env` file.
 
-    # For Claude agent
+    **Option 1: Using .env file (Recommended)**
+
+    Create a `.env` file in the project root directory:
+    ```bash
+    # .env file
+    GEMINI_API_KEY=your_gemini_api_key_here
+    ANTHROPIC_API_KEY=your_anthropic_api_key_here
+    ```
+
+    **Option 2: Using environment variables**
+
+    Export the variables in your shell:
+    ```bash
+    export GEMINI_API_KEY="your_gemini_api_key_here"
     export ANTHROPIC_API_KEY="your_anthropic_api_key_here"
     ```
 
-    You only need to set the API key(s) for the agent(s) you plan to use.
+    **Note:** The system will automatically load API keys from the `.env` file if it exists. You only need to set the API key(s) for the agent(s) you plan to use.
 
 ## Usage
 

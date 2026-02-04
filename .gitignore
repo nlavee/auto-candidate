@@ -1,2 +1,3 @@
 venv/
 auto_candidate/modules/__pycache__/
+.env

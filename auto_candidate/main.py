@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from dotenv import load_dotenv
 from modules.prerequisites import PrerequisiteChecker
 from modules.git_ops import GitOperations
 from modules.inspector import ContextBuilder
@@ -138,6 +139,9 @@ def start(
     AutoCandidate: Task-Based Parallel Solver
     """
     console.print(Panel.fit("[bold blue]AutoCandidate[/bold blue]\nTask-Based Parallel Solver"))
+
+    # Load environment variables from .env file if it exists
+    load_dotenv()
 
     # ... Setup ...
     if not repo_url and not local_path:
