@@ -17,6 +17,7 @@ from modules.providers.gemini_provider import GeminiProvider
 from modules.providers.claude_provider import ClaudeProvider
 from modules.coder import FilePatcher
 from modules.quality import QualityGate
+from modules.checkpoint import CheckpointManager, calculate_prompt_hash
 
 app = typer.Typer()
 console = Console()
@@ -181,7 +182,10 @@ def start(
     abs_workspace = os.path.abspath(workspace)
     if not os.path.exists(abs_workspace):
         os.makedirs(abs_workspace)
-    
+
+    # Initialize checkpoint manager
+    checkpoint = CheckpointManager(abs_workspace)
+
     git_ops = GitOperations(abs_workspace)
     repo_path = ""
     try:
@@ -207,6 +211,25 @@ def start(
 
     with open(final_prompt_path, "r") as f:
         prompt_text = f.read()
+
+    # Calculate prompt hash for checkpoint validation
+    prompt_hash = calculate_prompt_hash(final_prompt_path)
+
+    # Save Phase 1 checkpoint
+    checkpoint.save_checkpoint(1, {
+        "workspace": abs_workspace,
+        "repo_path": repo_path,
+        "prompt_file": final_prompt_path,
+        "prompt_hash": prompt_hash,
+        "prompt_text": prompt_text,
+        "configuration": {
+            "selected_model": model,
+            "planning_agent": planning_agent,
+            "execution_agent": execution_agent,
+            "integration_agent": integration_agent,
+            "verification_agent": verification_agent
+        }
+    })
 
     # --- PHASE 2: PLANNING ---
     console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
@@ -294,6 +317,17 @@ def start(
         task_table.add_row(t.get("id"), t.get("title"), ", ".join(t.get("target_files", [])[:3]))
     console.print(task_table)
 
+    # Save Phase 2 checkpoint
+    checkpoint.save_checkpoint(2, {
+        "phase_2_state": {
+            "plan_data": plan_data,
+            "master_plan_file": "MASTER_PLAN.md",
+            "task_spec_files": [f"PLAN_{t['id']}.md" for t in tasks],
+            "selected_model": selected_model,
+            "context_str_length": len(context_str)
+        }
+    })
+
     # --- PHASE 3: EXECUTION ---
     console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
     console.print(f"[dim]Execution agent: {execution_agent}[/dim]")
@@ -335,6 +369,18 @@ def start(
                 results.append(data)
             except Exception as exc:
                 console.print(f"[red]Task exception: {exc}[/red]")
+
+    # Mark all results as completed for checkpoint tracking
+    for res in results:
+        res["completed"] = True
+
+    # Save Phase 3 checkpoint
+    checkpoint.save_checkpoint(3, {
+        "phase_3_state": {
+            "base_branch": base_branch,
+            "task_results": results
+        }
+    })
 
     # --- PHASE 4: MERGE & VERIFY ---
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
@@ -407,7 +453,7 @@ def start(
 
     if not tests_passed:
         console.print(Panel(test_log, title="[bold red]Final Test Failures[/bold red]", border_style="red"))
-        
+
         failure_report_path = os.path.join(abs_workspace, "FAILURE_REPORT.md")
         with open(failure_report_path, "w") as f:
             f.write(f"# AutoCandidate Failure Report\n\n## Test Output\n```\n{test_log}\n```\n")
@@ -427,6 +473,17 @@ def start(
 
         console.print(Panel(verify_report, title="Requirement Verification", border_style="blue"))
         console.print(f"[dim]Verification report saved to: {verify_path}[/dim]")
+
+    # Save Phase 4 checkpoint
+    merged_branches = [r["branch"] for r in successful_tasks if r in results[:merge_success_count]]
+    checkpoint.save_checkpoint(4, {
+        "phase_4_state": {
+            "merged_branches": merged_branches,
+            "test_attempt": max_retries + 1 if not tests_passed else 1,
+            "tests_passed": tests_passed,
+            "last_test_output": test_log
+        }
+    })
 
     console.print(f"[dim]Project located at: {repo_path}[/dim]")
     console.print(f"[dim]To inspect: cd {workspace}/target_repo && git checkout {base_branch}[/dim]")
