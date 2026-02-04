@@ -291,172 +291,233 @@ def start(
     elif checkpoint.checkpoint_exists() and not resume:
         console.print("[yellow]Checkpoint exists but --resume not specified. Starting fresh.[/yellow]")
 
-    # Save Phase 1 checkpoint
-    checkpoint.save_checkpoint(1, {
-        "workspace": abs_workspace,
-        "repo_path": repo_path,
-        "prompt_file": final_prompt_path,
-        "prompt_hash": prompt_hash,
-        "prompt_text": prompt_text,
-        "configuration": {
-            "selected_model": model,
-            "planning_agent": planning_agent,
-            "execution_agent": execution_agent,
-            "integration_agent": integration_agent,
-            "verification_agent": verification_agent
-        }
-    })
+    # Handle Phase 1: Initialization (always load config, but might skip repo setup)
+    if resume_from_phase > 1 and checkpoint_data:
+        # Load configuration from checkpoint
+        config = checkpoint_data.get("configuration", {})
+        if not model:
+            model = config.get("selected_model")
+        console.print("[dim]Phase 1: Loaded from checkpoint[/dim]")
+    else:
+        # Save Phase 1 checkpoint
+        checkpoint.save_checkpoint(1, {
+            "workspace": abs_workspace,
+            "repo_path": repo_path,
+            "prompt_file": final_prompt_path,
+            "prompt_hash": prompt_hash,
+            "prompt_text": prompt_text,
+            "configuration": {
+                "selected_model": model,
+                "planning_agent": planning_agent,
+                "execution_agent": execution_agent,
+                "integration_agent": integration_agent,
+                "verification_agent": verification_agent
+            }
+        })
 
     # --- PHASE 2: PLANNING ---
-    console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
-    console.print(f"[dim]Planning agent: {planning_agent}[/dim]")
+    if resume_from_phase <= 2:
+        console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
+        console.print(f"[dim]Planning agent: {planning_agent}[/dim]")
 
-    # Model Selection
-    selected_model = model
-    if not selected_model:
-        # Get appropriate API key for planning agent
+        # Model Selection
+        selected_model = model
+        if not selected_model:
+            # Get appropriate API key for planning agent
+            planning_api_key = gemini_key if planning_agent == "gemini" else claude_key
+
+            # Get available models from planning provider
+            if planning_agent == "gemini":
+                available_models = GeminiProvider.list_available_models(planning_api_key)
+                provider_name = "Gemini"
+            else:
+                available_models = ClaudeProvider.list_available_models(planning_api_key)
+                provider_name = "Claude"
+
+            if not available_models:
+                console.print(f"[red]No {provider_name} models found available.[/red]")
+                raise typer.Exit(code=1)
+
+            console.print(f"\n[bold cyan]Available {provider_name} Models:[/bold cyan]")
+            for idx, name in enumerate(available_models, 1):
+                console.print(f"{idx}. {name}")
+
+            choice = typer.prompt("\nSelect a model number", type=int, default=1)
+            if 1 <= choice <= len(available_models):
+                selected_model = available_models[choice - 1]
+            else:
+                console.print("[red]Invalid selection. Defaulting to first model.[/red]")
+                selected_model = available_models[0]
+
+        console.print(f"[green]Using model: {selected_model}[/green]\n")
+
+        builder = ContextBuilder(repo_path)
+        context_str = builder.get_context_string()
+
+        # Create planning provider
         planning_api_key = gemini_key if planning_agent == "gemini" else claude_key
+        planner = create_provider(planning_agent, planning_api_key, selected_model)
 
-        # Get available models from planning provider
-        if planning_agent == "gemini":
-            available_models = GeminiProvider.list_available_models(planning_api_key)
-            provider_name = "Gemini"
-        else:
-            available_models = ClaudeProvider.list_available_models(planning_api_key)
-            provider_name = "Claude"
+        plan_data = planner.create_task_breakdown(prompt_text, context_str)
+        tasks = plan_data.get("tasks", [])
+        plan_overview = plan_data.get("plan_overview", "")
 
-        if not available_models:
-            console.print(f"[red]No {provider_name} models found available.[/red]")
-            raise typer.Exit(code=1)
+        if not tasks:
+            console.print("[red]Failed to generate valid tasks. Exiting.[/red]")
+            raise typer.Exit(1)
 
-        console.print(f"\n[bold cyan]Available {provider_name} Models:[/bold cyan]")
-        for idx, name in enumerate(available_models, 1):
-            console.print(f"{idx}. {name}")
+        master_doc = planner.create_master_plan_doc(plan_data, context_str)
 
-        choice = typer.prompt("\nSelect a model number", type=int, default=1)
-        if 1 <= choice <= len(available_models):
-            selected_model = available_models[choice - 1]
-        else:
-            console.print("[red]Invalid selection. Defaulting to first model.[/red]")
-            selected_model = available_models[0]
+        sub_plan_docs = {}
+        for t in tasks:
+            doc = planner.create_task_spec_doc(t, master_doc, context_str)
+            sub_plan_docs[t["id"]] = doc
 
-    console.print(f"[green]Using model: {selected_model}[/green]\n")
+        review_result = planner.review_and_refine_plan(plan_data, master_doc, sub_plan_docs)
+        if review_result != "OK":
+            console.print("[yellow]Plan refinement triggered by Architect...[/yellow]")
+            try:
+                cleaned = review_result.replace("```json", "").replace("```", "").strip()
+                new_plan_data = json.loads(cleaned)
+                tasks = new_plan_data.get("tasks", [])
+                plan_overview = new_plan_data.get("plan_overview", plan_overview)
+                console.print(f"[green]Plan refined. New task count: {len(tasks)}[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to parse refined plan: {e}. Reverting to original.[/red]")
 
-    builder = ContextBuilder(repo_path)
-    context_str = builder.get_context_string()
+        with open(os.path.join(abs_workspace, "MASTER_PLAN.md"), "w") as f:
+            f.write(master_doc)
 
-    # Create planning provider
-    planning_api_key = gemini_key if planning_agent == "gemini" else claude_key
-    planner = create_provider(planning_agent, planning_api_key, selected_model)
+        for t_id, doc in sub_plan_docs.items():
+            clean_id = "".join(c for c in t_id if c.isalnum() or c in ('-','_'))
+            with open(os.path.join(abs_workspace, f"PLAN_{clean_id}.md"), "w") as f:
+                f.write(doc)
 
-    plan_data = planner.create_task_breakdown(prompt_text, context_str)
-    tasks = plan_data.get("tasks", [])
-    plan_overview = plan_data.get("plan_overview", "")
+        console.print(f"\n[bold]Plan Overview:[/bold] {plan_overview}\n")
+        task_table = Table(title="Execution Tasks")
+        task_table.add_column("ID", style="cyan")
+        task_table.add_column("Task", style="bold")
+        task_table.add_column("Target Files")
+        for t in tasks:
+            task_table.add_row(t.get("id"), t.get("title"), ", ".join(t.get("target_files", [])[:3]))
+        console.print(task_table)
 
-    if not tasks:
-        console.print("[red]Failed to generate valid tasks. Exiting.[/red]")
-        raise typer.Exit(1)
+        # Save Phase 2 checkpoint
+        checkpoint.save_checkpoint(2, {
+            "phase_2_state": {
+                "plan_data": plan_data,
+                "master_plan_file": "MASTER_PLAN.md",
+                "task_spec_files": [f"PLAN_{t['id']}.md" for t in tasks],
+                "selected_model": selected_model,
+                "context_str_length": len(context_str)
+            }
+        })
+    else:
+        # Load planning data from checkpoint
+        console.print("[dim]Phase 2: Loading from checkpoint...[/dim]")
+        phase_2_state = checkpoint_data["phase_2_state"]
+        plan_data = phase_2_state["plan_data"]
+        tasks = plan_data["tasks"]
+        plan_overview = plan_data["plan_overview"]
+        selected_model = phase_2_state["selected_model"]
 
-    master_doc = planner.create_master_plan_doc(plan_data, context_str)
-    
-    sub_plan_docs = {}
-    for t in tasks:
-        doc = planner.create_task_spec_doc(t, master_doc, context_str)
-        sub_plan_docs[t["id"]] = doc
+        # Initialize builder for later use
+        builder = ContextBuilder(repo_path)
+        context_str = builder.get_context_string()
 
-    review_result = planner.review_and_refine_plan(plan_data, master_doc, sub_plan_docs)
-    if review_result != "OK":
-        console.print("[yellow]Plan refinement triggered by Architect...[/yellow]")
-        try:
-            cleaned = review_result.replace("```json", "").replace("```", "").strip()
-            new_plan_data = json.loads(cleaned)
-            tasks = new_plan_data.get("tasks", [])
-            plan_overview = new_plan_data.get("plan_overview", plan_overview)
-            console.print(f"[green]Plan refined. New task count: {len(tasks)}[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to parse refined plan: {e}. Reverting to original.[/red]")
+        # Read planning docs from disk
+        with open(os.path.join(abs_workspace, "MASTER_PLAN.md")) as f:
+            master_doc = f.read()
 
-    with open(os.path.join(abs_workspace, "MASTER_PLAN.md"), "w") as f:
-        f.write(master_doc)
-    
-    for t_id, doc in sub_plan_docs.items():
-        clean_id = "".join(c for c in t_id if c.isalnum() or c in ('-','_'))
-        with open(os.path.join(abs_workspace, f"PLAN_{clean_id}.md"), "w") as f:
-            f.write(doc)
+        sub_plan_docs = {}
+        for t in tasks:
+            clean_id = "".join(c for c in t["id"] if c.isalnum() or c in ('-','_'))
+            plan_file = os.path.join(abs_workspace, f"PLAN_{clean_id}.md")
+            with open(plan_file) as f:
+                sub_plan_docs[t["id"]] = f.read()
 
-    console.print(f"\n[bold]Plan Overview:[/bold] {plan_overview}\n")
-    task_table = Table(title="Execution Tasks")
-    task_table.add_column("ID", style="cyan")
-    task_table.add_column("Task", style="bold")
-    task_table.add_column("Target Files")
-    for t in tasks:
-        task_table.add_row(t.get("id"), t.get("title"), ", ".join(t.get("target_files", [])[:3]))
-    console.print(task_table)
-
-    # Save Phase 2 checkpoint
-    checkpoint.save_checkpoint(2, {
-        "phase_2_state": {
-            "plan_data": plan_data,
-            "master_plan_file": "MASTER_PLAN.md",
-            "task_spec_files": [f"PLAN_{t['id']}.md" for t in tasks],
-            "selected_model": selected_model,
-            "context_str_length": len(context_str)
-        }
-    })
+        console.print(f"[green]Loaded {len(tasks)} tasks from checkpoint[/green]")
 
     # --- PHASE 3: EXECUTION ---
-    console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
-    console.print(f"[dim]Execution agent: {execution_agent}[/dim]")
+    if resume_from_phase <= 3:
+        console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
+        console.print(f"[dim]Execution agent: {execution_agent}[/dim]")
 
-    base_branch = "solution-v1"
-    try:
+        base_branch = "solution-v1"
+        try:
+            repo = Repo(repo_path)
+            git_ops.create_branch(repo_path, base_branch)
+        except Exception as e:
+            console.print(f"[red]Git setup error: {e}[/red]")
+            raise typer.Exit(1)
+
+        # Handle partial resume: check which tasks already completed
+        if resume_from_phase == 3 and checkpoint_data:
+            phase_3_state = checkpoint_data.get("phase_3_state", {})
+            previous_results = phase_3_state.get("task_results", [])
+            completed_task_ids = {r["id"] for r in previous_results if r.get("completed")}
+
+            # Filter tasks to only incomplete ones
+            tasks_to_run = [t for t in tasks if t["id"] not in completed_task_ids]
+            console.print(f"[cyan]Resuming execution: {len(completed_task_ids)} tasks already completed, {len(tasks_to_run)} remaining[/cyan]")
+
+            # Start with previous results
+            results = previous_results
+        else:
+            tasks_to_run = tasks
+            results = []
+
+        # Get API key for execution agent
+        execution_api_key = gemini_key if execution_agent == "gemini" else claude_key
+
+        # Execute remaining tasks
+        if tasks_to_run:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks_to_run)) as executor:
+                future_to_task = {
+                    executor.submit(
+                        process_task,
+                        t,
+                        repo_path,
+                        base_branch,
+                        abs_workspace,
+                        execution_agent,
+                        execution_api_key,
+                        selected_model,
+                        context_str,
+                        master_doc,
+                        sub_plan_docs.get(t["id"], "")
+                    ): t
+                    for t in tasks_to_run
+                }
+
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        data = future.result()
+                        results.append(data)
+                    except Exception as exc:
+                        console.print(f"[red]Task exception: {exc}[/red]")
+
+        # Mark all results as completed for checkpoint tracking
+        for res in results:
+            res["completed"] = True
+
+        # Save Phase 3 checkpoint
+        checkpoint.save_checkpoint(3, {
+            "phase_3_state": {
+                "base_branch": base_branch,
+                "task_results": results
+            }
+        })
+    else:
+        # Load execution results from checkpoint
+        console.print("[dim]Phase 3: Loading from checkpoint...[/dim]")
+        phase_3_state = checkpoint_data["phase_3_state"]
+        results = phase_3_state["task_results"]
+        base_branch = phase_3_state["base_branch"]
+        console.print(f"[green]Loaded {len(results)} task results from checkpoint[/green]")
+
+        # Initialize repo for later use
         repo = Repo(repo_path)
-        git_ops.create_branch(repo_path, base_branch)
-    except Exception as e:
-        console.print(f"[red]Git setup error: {e}[/red]")
-        raise typer.Exit(1)
-
-    results = []
-
-    # Get API key for execution agent
-    execution_api_key = gemini_key if execution_agent == "gemini" else claude_key
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_task = {
-            executor.submit(
-                process_task,
-                t,
-                repo_path,
-                base_branch,
-                abs_workspace,
-                execution_agent,
-                execution_api_key,
-                selected_model,
-                context_str,
-                master_doc,
-                sub_plan_docs.get(t["id"], "")
-            ): t
-            for t in tasks
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_task):
-            try:
-                data = future.result()
-                results.append(data)
-            except Exception as exc:
-                console.print(f"[red]Task exception: {exc}[/red]")
-
-    # Mark all results as completed for checkpoint tracking
-    for res in results:
-        res["completed"] = True
-
-    # Save Phase 3 checkpoint
-    checkpoint.save_checkpoint(3, {
-        "phase_3_state": {
-            "base_branch": base_branch,
-            "task_results": results
-        }
-    })
 
     # --- PHASE 4: MERGE & VERIFY ---
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
@@ -470,8 +531,23 @@ def start(
     successful_tasks = [r for r in results if r["status"] in ["SUCCESS", "WARN"]]
     successful_tasks.sort(key=lambda x: x["id"])
 
-    merge_success_count = 0
-    for res in successful_tasks:
+    # Handle partial resume: check which branches already merged
+    if resume_from_phase == 4 and checkpoint_data:
+        phase_4_state = checkpoint_data.get("phase_4_state", {})
+        merged_branches = set(phase_4_state.get("merged_branches", []))
+        test_attempt_start = phase_4_state.get("test_attempt", 0)
+        console.print(f"[cyan]Resuming integration: {len(merged_branches)} branches already merged[/cyan]")
+
+        # Filter out already-merged branches
+        tasks_to_merge = [r for r in successful_tasks if r["branch"] not in merged_branches]
+    else:
+        merged_branches = set()
+        test_attempt_start = 0
+        tasks_to_merge = successful_tasks
+
+    # Merge remaining branches
+    merge_success_count = len(merged_branches)
+    for res in tasks_to_merge:
         if git_ops.merge_feature_branch(
             repo_path,
             base_branch,
@@ -480,6 +556,7 @@ def start(
             plan_context=master_doc
         ):
             merge_success_count += 1
+            merged_branches.add(res["branch"])
 
     console.print(f"\n[green]Merged {merge_success_count}/{len(successful_tasks)} feature branches into {base_branch}[/green]")
 
@@ -551,10 +628,9 @@ def start(
         console.print(f"[dim]Verification report saved to: {verify_path}[/dim]")
 
     # Save Phase 4 checkpoint
-    merged_branches = [r["branch"] for r in successful_tasks if r in results[:merge_success_count]]
     checkpoint.save_checkpoint(4, {
         "phase_4_state": {
-            "merged_branches": merged_branches,
+            "merged_branches": list(merged_branches),
             "test_attempt": max_retries + 1 if not tests_passed else 1,
             "tests_passed": tests_passed,
             "last_test_output": test_log
