@@ -1,6 +1,6 @@
 # AutoCandidate
 
-AutoCandidate is an autonomous CLI agent designed to solve take-home coding challenges. It leverages the Gemini API to plan, architect, and implement solutions in a parallelized, task-based workflow.
+AutoCandidate is an autonomous CLI agent designed to solve take-home coding challenges. It leverages LLM APIs (Gemini and Claude Code) to plan, architect, and implement solutions in a parallelized, task-based workflow.
 
 ## Key Features
 
@@ -10,13 +10,16 @@ AutoCandidate is an autonomous CLI agent designed to solve take-home coding chal
 *   **Automated Conflict Resolution**: Intelligently resolves git merge conflicts using LLM reasoning during the integration phase.
 *   **Self-Healing**: If integration tests fail, the system iteratively attempts to fix the code by analyzing error logs.
 *   **Verification**: Performs a final semantic verification of the solution against the original requirements.
+*   **Multi-Agent Support**: Choose between Gemini and Claude Code for different phases of the workflow, optimizing for each agent's strengths.
 
 ## Prerequisites
 
 *   **Python 3.10+**
 *   **Docker**: Required for running tests in a consistent environment (optional but recommended).
 *   **Git**: Must be installed and configured.
-*   **Gemini API Key**: You need a valid API key from Google AI Studio.
+*   **LLM API Keys**: You need at least one of the following:
+    *   **Gemini API Key**: From Google AI Studio (for Gemini agent)
+    *   **Anthropic API Key**: From Anthropic Console (for Claude agent)
 
 ## Setup
 
@@ -33,10 +36,16 @@ AutoCandidate is an autonomous CLI agent designed to solve take-home coding chal
     ```
 
 3.  **Configure Environment:**
-    Create a `.env` file in the `auto_candidate` directory or export the variable:
+    Create a `.env` file in the `auto_candidate` directory or export the variables:
     ```bash
-    export GEMINI_API_KEY="your_api_key_here"
+    # For Gemini agent
+    export GEMINI_API_KEY="your_gemini_api_key_here"
+
+    # For Claude agent
+    export ANTHROPIC_API_KEY="your_anthropic_api_key_here"
     ```
+
+    You only need to set the API key(s) for the agent(s) you plan to use.
 
 ## Usage
 
@@ -61,7 +70,53 @@ python auto_candidate/main.py start prompt.md --repo-url https://github.com/user
 ### Options
 
 *   `--workspace`: Directory where the project will be built (default: `./workspace`).
-*   `--model`: Specify a Gemini model (e.g., `gemini-1.5-pro`) to skip interactive selection.
+*   `--model`: Specify a model (e.g., `gemini-2.0-flash` or `claude-sonnet-4-5-20250929`) to skip interactive selection.
+*   `--planning-agent`: Agent for planning phase: `gemini` or `claude` (default: `gemini`).
+*   `--execution-agent`: Agent for execution phase: `gemini` or `claude` (default: `gemini`).
+*   `--integration-agent`: Agent for integration phase: `gemini` or `claude` (default: `gemini`).
+*   `--verification-agent`: Agent for verification phase: `gemini` or `claude` (default: `gemini`).
+
+## Multi-Agent Support
+
+AutoCandidate now supports using different LLM agents for different phases of the workflow. This allows you to leverage the strengths of each model:
+
+### Use Claude for Everything
+
+```bash
+python auto_candidate/main.py start prompt.md \
+  --local-path /path/to/repo \
+  --planning-agent claude \
+  --execution-agent claude \
+  --integration-agent claude \
+  --verification-agent claude
+```
+
+### Mix Agents (Recommended)
+
+Use Gemini for planning and Claude for implementation:
+
+```bash
+python auto_candidate/main.py start prompt.md \
+  --local-path /path/to/repo \
+  --planning-agent gemini \
+  --execution-agent claude \
+  --integration-agent claude \
+  --verification-agent gemini
+```
+
+### Use Gemini for Everything (Default)
+
+If you don't specify agent options, the system defaults to using Gemini for all phases:
+
+```bash
+python auto_candidate/main.py start prompt.md --local-path /path/to/repo
+```
+
+### Required API Keys
+
+The system will automatically check for the required API keys based on which agents you select:
+- If using `gemini` for any phase: `GEMINI_API_KEY` must be set
+- If using `claude` for any phase: `ANTHROPIC_API_KEY` must be set
 
 ## Output Artifacts
 
