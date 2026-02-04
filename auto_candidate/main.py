@@ -11,17 +11,31 @@ from modules.prerequisites import PrerequisiteChecker
 from modules.git_ops import GitOperations
 from modules.inspector import ContextBuilder
 from modules.llm_engine import GeminiPlanner
+from modules.providers.base_provider import BaseLLMProvider
+from modules.providers.gemini_provider import GeminiProvider
+from modules.providers.claude_provider import ClaudeProvider
 from modules.coder import FilePatcher
 from modules.quality import QualityGate
 
 app = typer.Typer()
 console = Console()
 
+
+def create_provider(provider_name: str, api_key: str, model_name: str) -> BaseLLMProvider:
+    """Factory to create provider instances."""
+    if provider_name == "gemini":
+        return GeminiProvider(api_key, model_name)
+    elif provider_name == "claude":
+        return ClaudeProvider(api_key, model_name)
+    else:
+        raise ValueError(f"Unknown provider: {provider_name}. Supported: gemini, claude")
+
 def process_task(
     task: Dict[str, Any],
     base_repo_path: str,
     base_branch: str,
     workspace_dir: str,
+    provider_name: str,
     api_key: str,
     model_name: str,
     context_str: str,
@@ -35,13 +49,13 @@ def process_task(
     task_title = task.get("title", "Untitled")
     feature_branch = f"feat/{task_id}"
     worktree_path = os.path.join(workspace_dir, f"worktree-{task_id}")
-    
+
     prefix = f"[{task_id}]"
     console.print(f"[cyan]{prefix} Starting: {task_title}...[/cyan]")
 
     try:
         git_ops = GitOperations(workspace_dir)
-        
+
         # 1. Create Feature Branch
         repo = Repo(base_repo_path)
         if feature_branch not in repo.heads:
@@ -54,11 +68,11 @@ def process_task(
         git_ops.setup_worktree(base_repo_path, feature_branch, worktree_path)
 
         # 3. Generate Code
-        planner = GeminiPlanner(api_key=api_key, model_name=model_name)
-        code_response = planner.execute_task(
-            task, 
-            context_str, 
-            plan_overview=plan_overview, 
+        provider = create_provider(provider_name, api_key, model_name)
+        code_response = provider.execute_task(
+            task,
+            context_str,
+            plan_overview=plan_overview,
             task_spec=task_spec
         )
         
@@ -114,7 +128,11 @@ def start(
     local_path: Optional[str] = typer.Option(None, help="Path to a local directory to use instead of a remote repo"),
     workspace: str = typer.Option("./workspace", help="Directory where the project will be built"),
     versions: int = typer.Option(1, help="Number of solution versions (Ignored in task mode, default 1)"),
-    model: str = typer.Option(None, help="Gemini model to use. Skips interactive selection.")
+    model: str = typer.Option(None, help="Model to use. Skips interactive selection."),
+    planning_agent: str = typer.Option("gemini", help="Agent for planning phase: gemini or claude"),
+    execution_agent: str = typer.Option("gemini", help="Agent for execution phase: gemini or claude"),
+    integration_agent: str = typer.Option("gemini", help="Agent for integration phase: gemini or claude"),
+    verification_agent: str = typer.Option("gemini", help="Agent for verification phase: gemini or claude"),
 ):
     """
     AutoCandidate: Task-Based Parallel Solver
@@ -129,8 +147,30 @@ def start(
         console.print("[bold red]Error: Please provide only one.[/bold red]")
         raise typer.Exit(code=1)
 
+    # Check API keys based on which agents are being used
+    agents_used = {planning_agent, execution_agent, integration_agent, verification_agent}
+
+    gemini_key = None
+    claude_key = None
+
+    if "gemini" in agents_used:
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            console.print("[bold red]Error: GEMINI_API_KEY environment variable not set[/bold red]")
+            console.print("Gemini agent is selected but API key is missing.")
+            raise typer.Exit(1)
+
+    if "claude" in agents_used:
+        claude_key = os.getenv("ANTHROPIC_API_KEY")
+        if not claude_key:
+            console.print("[bold red]Error: ANTHROPIC_API_KEY environment variable not set[/bold red]")
+            console.print("Claude agent is selected but API key is missing.")
+            raise typer.Exit(1)
+
+    # For backward compatibility, set api_key to gemini_key if available
+    api_key = gemini_key or claude_key
+
     checker = PrerequisiteChecker()
-    api_key = checker.check_api_key()
     if not checker.check_docker():
         console.print("[yellow]Warning: Docker check failed.[/yellow]")
 
@@ -166,34 +206,46 @@ def start(
 
     # --- PHASE 2: PLANNING ---
     console.print(Panel("[bold]Phase 2: Task Breakdown & Documentation[/bold]", border_style="blue"))
-    
+    console.print(f"[dim]Planning agent: {planning_agent}[/dim]")
+
     # Model Selection
     selected_model = model
     if not selected_model:
-        available_models = GeminiPlanner.list_available_models(api_key)
-        
+        # Get appropriate API key for planning agent
+        planning_api_key = gemini_key if planning_agent == "gemini" else claude_key
+
+        # Get available models from planning provider
+        if planning_agent == "gemini":
+            available_models = GeminiProvider.list_available_models(planning_api_key)
+            provider_name = "Gemini"
+        else:
+            available_models = ClaudeProvider.list_available_models(planning_api_key)
+            provider_name = "Claude"
+
         if not available_models:
-            console.print("[red]No Gemini models found available for your key.[/red]")
+            console.print(f"[red]No {provider_name} models found available.[/red]")
             raise typer.Exit(code=1)
 
-        console.print("\n[bold cyan]Available Gemini Models:[/bold cyan]")
+        console.print(f"\n[bold cyan]Available {provider_name} Models:[/bold cyan]")
         for idx, name in enumerate(available_models, 1):
             console.print(f"{idx}. {name}")
-        
+
         choice = typer.prompt("\nSelect a model number", type=int, default=1)
         if 1 <= choice <= len(available_models):
             selected_model = available_models[choice - 1]
         else:
             console.print("[red]Invalid selection. Defaulting to first model.[/red]")
             selected_model = available_models[0]
-        
+
     console.print(f"[green]Using model: {selected_model}[/green]\n")
 
     builder = ContextBuilder(repo_path)
     context_str = builder.get_context_string()
-    
-    planner = GeminiPlanner(api_key=api_key, model_name=selected_model)
-    
+
+    # Create planning provider
+    planning_api_key = gemini_key if planning_agent == "gemini" else claude_key
+    planner = create_provider(planning_agent, planning_api_key, selected_model)
+
     plan_data = planner.create_task_breakdown(prompt_text, context_str)
     tasks = plan_data.get("tasks", [])
     plan_overview = plan_data.get("plan_overview", "")
@@ -240,31 +292,36 @@ def start(
 
     # --- PHASE 3: EXECUTION ---
     console.print(Panel(f"[bold]Phase 3: Parallel Execution ({len(tasks)} tasks)[/bold]", border_style="magenta"))
-    
+    console.print(f"[dim]Execution agent: {execution_agent}[/dim]")
+
     base_branch = "solution-v1"
     try:
         repo = Repo(repo_path)
-        git_ops.create_branch(repo_path, base_branch) 
+        git_ops.create_branch(repo_path, base_branch)
     except Exception as e:
         console.print(f"[red]Git setup error: {e}[/red]")
         raise typer.Exit(1)
 
     results = []
-    
+
+    # Get API key for execution agent
+    execution_api_key = gemini_key if execution_agent == "gemini" else claude_key
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_task = {
             executor.submit(
-                process_task, 
-                t, 
-                repo_path, 
-                base_branch, 
-                abs_workspace, 
-                api_key, 
-                selected_model, 
+                process_task,
+                t,
+                repo_path,
+                base_branch,
+                abs_workspace,
+                execution_agent,
+                execution_api_key,
+                selected_model,
                 context_str,
-                master_doc, 
+                master_doc,
                 sub_plan_docs.get(t["id"], "")
-            ): t 
+            ): t
             for t in tasks
         }
         
@@ -277,30 +334,36 @@ def start(
 
     # --- PHASE 4: MERGE & VERIFY ---
     console.print(Panel("[bold]Phase 4: Integration & Verification[/bold]", border_style="green"))
-    
+    console.print(f"[dim]Integration agent: {integration_agent}[/dim]")
+    console.print(f"[dim]Verification agent: {verification_agent}[/dim]")
+
+    # Create integration provider for merge conflict resolution and fixing
+    integration_api_key = gemini_key if integration_agent == "gemini" else claude_key
+    integration_provider = create_provider(integration_agent, integration_api_key, selected_model)
+
     successful_tasks = [r for r in results if r["status"] in ["SUCCESS", "WARN"]]
     successful_tasks.sort(key=lambda x: x["id"])
-    
+
     merge_success_count = 0
     for res in successful_tasks:
         if git_ops.merge_feature_branch(
-            repo_path, 
-            base_branch, 
-            res["branch"], 
-            resolver=planner,
+            repo_path,
+            base_branch,
+            res["branch"],
+            resolver=integration_provider,
             plan_context=master_doc
         ):
             merge_success_count += 1
-    
+
     console.print(f"\n[green]Merged {merge_success_count}/{len(successful_tasks)} feature branches into {base_branch}[/green]")
-    
+
     # Final Verification Loop
     gate = QualityGate()
     repo_patcher = FilePatcher(repo_path)
 
     console.print("[cyan]Running Final Integration Tests...[/cyan]")
     gate.install_dependencies(repo_path)
-    
+
     max_retries = 2
     tests_passed = False
     test_log = ""
@@ -308,16 +371,16 @@ def start(
     for attempt in range(max_retries + 1):
         success, output = gate.run_tests(repo_path)
         test_log = output
-        
+
         if success:
             tests_passed = True
             break
-        
+
         if attempt < max_retries:
             console.print(Panel(output[-1000:], title=f"[yellow]Tests Failed (Attempt {attempt+1}/{max_retries+1}). Fix requested...[/yellow]", border_style="yellow"))
-            
+
             new_context = builder.get_context_string()
-            fix_response = planner.fix_code(output, prompt_text, new_context)
+            fix_response = integration_provider.fix_code(output, prompt_text, new_context)
             
             if fix_response:
                 try:
@@ -348,12 +411,16 @@ def start(
         console.print("[bold red]Action Required: Please review the failures manually.[/bold red]")
     else:
         console.print("[bold green]All Tests Passed![/bold green]")
-        
-        verify_report = planner.verify_solution(prompt_text, builder.get_context_string(), test_log)
+
+        # Create verification provider
+        verification_api_key = gemini_key if verification_agent == "gemini" else claude_key
+        verification_provider = create_provider(verification_agent, verification_api_key, selected_model)
+
+        verify_report = verification_provider.verify_solution(prompt_text, builder.get_context_string(), test_log)
         verify_path = os.path.join(abs_workspace, "VERIFICATION_REPORT.md")
         with open(verify_path, "w") as f:
             f.write(verify_report)
-        
+
         console.print(Panel(verify_report, title="Requirement Verification", border_style="blue"))
         console.print(f"[dim]Verification report saved to: {verify_path}[/dim]")
 
