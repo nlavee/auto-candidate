@@ -2,6 +2,37 @@
 
 AutoCandidate is an autonomous CLI agent designed to solve take-home coding challenges. It leverages LLM APIs (Gemini and Claude Code) to plan, architect, and implement solutions in a parallelized, task-based workflow.
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Key Features](#key-features)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Usage](#usage)
+  - [Interactive Mode](#interactive-mode-recommended)
+  - [Direct Command Mode](#direct-command-mode)
+- [Multi-Agent Support](#multi-agent-support)
+- [Checkpoint and Resume](#checkpoint-and-resume)
+- [Output Artifacts](#output-artifacts)
+
+## Quick Start
+
+Get started in 3 simple steps:
+
+```bash
+# 1. Run setup
+./setup.sh
+
+# 2. Configure API keys (create .env file)
+echo "GEMINI_API_KEY=your_key_here" > .env
+echo "ANTHROPIC_API_KEY=your_key_here" >> .env
+
+# 3. Run the interactive tool
+./run.sh
+```
+
+That's it! The interactive runner will guide you through the rest.
+
 ## Key Features
 
 *   **Autonomous Planning**: Analyzes the codebase and prompt to generate a comprehensive Master Implementation Plan and detailed Task Specifications.
@@ -57,21 +88,46 @@ AutoCandidate is an autonomous CLI agent designed to solve take-home coding chal
 
     **Note:** The system will automatically load API keys from the `.env` file if it exists. You only need to set the API key(s) for the agent(s) you plan to use.
 
+4.  **Start using AutoCandidate:**
+
+    Run the interactive tool:
+    ```bash
+    ./run.sh
+    ```
+
+    Or use direct commands (see Usage section below).
+
 ## Usage
 
-The main entry point is `main.py`. You can run it using the virtual environment created by the setup script.
+AutoCandidate provides two ways to run: an interactive mode (recommended for beginners) and direct command-line mode (for advanced users).
 
-### basic Usage
+### Interactive Mode (Recommended)
 
-To solve a challenge defined in `prompt.md` using a local repository:
+The easiest way to get started is using the interactive runner:
 
+```bash
+./run.sh
+```
+
+This interactive script will guide you through:
+- **Main Operations**: Start a new run, check checkpoint status, clear checkpoints, or view checkpoint details
+- **Run Configuration**: Prompt file location, repository source (local/remote), workspace directory
+- **Agent Selection**: Choose Gemini, Claude, or custom configuration for each phase
+- **Resume Mode**: Automatically detect and resume from checkpoints
+- **Model Selection**: Specify a model or select interactively
+- **Smart Validation**: Checks for required files and API keys before running
+
+### Direct Command Mode
+
+For advanced users or scripting, you can run AutoCandidate directly:
+
+**Using a local repository:**
 ```bash
 source venv/bin/activate
 python auto_candidate/main.py start prompt.md --local-path /path/to/challenge/repo
 ```
 
-To solve a challenge from a remote Git URL:
-
+**Using a remote Git URL:**
 ```bash
 source venv/bin/activate
 python auto_candidate/main.py start prompt.md --repo-url https://github.com/username/challenge-repo.git
@@ -131,16 +187,25 @@ The system will automatically check for the required API keys based on which age
 
 ## Checkpoint and Resume
 
-AutoCandidate now supports checkpointing and resuming from failures. This is helpful for long-running tasks where you want to fix issues and continue without starting from scratch.
+AutoCandidate supports checkpointing and resuming from failures. This is helpful for long-running tasks where you want to fix issues and continue without starting from scratch.
 
 ### How It Works
 
 1. **Automatic Checkpoints**: The system automatically saves checkpoints after each phase completes
-2. **Resume Flag**: Use `--resume` to continue from the last checkpoint
+2. **Resume Mode**: Use `--resume` flag (or enable in interactive mode) to continue from the last checkpoint
 3. **Manual Fixes**: You can make manual fixes between runs (edit code, fix planning docs, etc.)
 4. **Validation**: Checkpoints are validated to ensure compatibility with the current run
 
 ### Usage Examples
+
+**Using Interactive Mode (Easiest):**
+```bash
+./run.sh
+# Select option 1 (Start), then answer 'y' when asked about resume mode
+# Or select option 2, 3, or 4 for checkpoint management
+```
+
+**Using Direct Commands:**
 
 **Start a new run (creates checkpoints automatically):**
 ```bash
